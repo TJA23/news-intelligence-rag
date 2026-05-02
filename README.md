@@ -1,102 +1,213 @@
-# 📰 LLM-Powered News Intelligence Platform (RAG-based)
+# 📰 News Intelligence Platform · LLM-Powered (RAG)
 
-> **Status:** 🚧 Codebase being rebuilt — original lost in laptop failure. Architecture, design, and results documented below.
+> ✅ **Status:** Working MVP — ingests live RSS feeds, builds a semantic index, and answers questions with grounded, cited responses.
 
-An intelligent news analysis platform that ingests articles from multiple sources, builds a searchable knowledge base, and answers context-aware questions using **Retrieval-Augmented Generation (RAG)**.
+An end-to-end **Retrieval-Augmented Generation** platform that ingests news from multiple RSS feeds, builds a FAISS-backed semantic index, and serves four capabilities through a FastAPI app:
 
-![Python](https://img.shields.io/badge/Python-3776AB?style=flat&logo=python&logoColor=white)
-![OpenAI](https://img.shields.io/badge/OpenAI-412991?style=flat&logo=openai&logoColor=white)
-![FAISS](https://img.shields.io/badge/FAISS-0084FF?style=flat&logo=meta&logoColor=white)
-![Transformers](https://img.shields.io/badge/🤗_Transformers-FFD21E?style=flat&logoColor=black)
-![Airflow](https://img.shields.io/badge/Apache_Airflow-017CEE?style=flat&logo=apache-airflow&logoColor=white)
-![AWS](https://img.shields.io/badge/AWS_S3-569A31?style=flat&logo=amazon-s3&logoColor=white)
-![Status](https://img.shields.io/badge/status-rebuilding-yellow)
+1. **Ingestion** — fetch & deduplicate articles from configured feeds
+2. **Semantic search** — vector similarity over the corpus
+3. **Contextual QA** — RAG-grounded answers with inline citations
+4. **Trends** — top entities + sentiment distribution across the corpus
+
+![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![FAISS](https://img.shields.io/badge/FAISS-0084FF?logo=meta&logoColor=white)
+![Sentence-Transformers](https://img.shields.io/badge/Sentence--Transformers-FFD21E?logoColor=black)
+![Groq](https://img.shields.io/badge/Groq-F55036?logoColor=white)
+![Status](https://img.shields.io/badge/status-MVP_working-brightgreen)
 
 ---
 
-## 🎯 Problem
+## 🎯 What it does
 
-News content is fragmented across thousands of sources, with massive volume and noise. Analysts and decision-makers need:
-- A unified pipeline to **ingest, deduplicate, and store** news articles
-- **Contextual search & question-answering** that goes beyond keyword matching
-- Insight extraction: entities, sentiment, topics
-- Continuous, automated updates as new articles arrive
+```
+You: POST /ingest        → fetches latest from BBC, NPR, Guardian, HN, TechCrunch, Ars Technica
+You: POST /reindex       → chunks + embeds + builds FAISS index
+You: GET  /search?q=iran → top semantic matches across the corpus
+You: POST /ask           → RAG-grounded answer with citations
+You: GET  /trends        → trending entities + sentiment distribution
+```
+
+Sample real-world output (corpus of 60 articles ingested):
+
+```json
+// GET /trends
+{
+  "article_count": 60,
+  "top_entities": [
+    {"name": "Trump",  "mentions": 10},
+    {"name": "AI",     "mentions": 7},
+    {"name": "Iran",   "mentions": 5},
+    {"name": "China",  "mentions": 3},
+    {"name": "AWS",    "mentions": 3}
+  ],
+  "sentiment_distribution": {"positive": 7, "neutral": 45, "negative": 8}
+}
+```
+
+```json
+// POST /ask {"question":"AI being used in defense or government"}
+{
+  "answer": "The Pentagon has inked deals with Nvidia, Microsoft, and AWS to
+             deploy AI on classified networks ... [Source: TechCrunch — Pentagon
+             inks deals with Nvidia, Microsoft, and AWS...]",
+  "sources": [...]
+}
+```
 
 ## 🏗️ Architecture
 
 ```
-┌──────────────┐    ┌─────────────┐    ┌────────────────┐    ┌──────────┐
-│  News APIs / │ ─► │  Ingestion  │ ─► │  Cleaning &    │ ─► │  AWS S3  │
-│  RSS / Feeds │    │  (Python)   │    │  Deduplication │    │  (Raw)   │
-└──────────────┘    └─────────────┘    └────────────────┘    └────┬─────┘
-                                                                   │
-                          ┌────────────────────────────────────────┘
-                          ▼
-              ┌───────────────────────┐    ┌─────────────────┐
-              │  Embeddings           │ ─► │  FAISS Index    │
-              │  (Sentence-BERT)      │    │  (Vector Store) │
-              └───────────────────────┘    └────────┬────────┘
+┌──────────────┐    ┌──────────────┐    ┌────────────────┐    ┌──────────┐
+│  RSS Feeds   │ ─► │  httpx +     │ ─► │  HTML cleaning │ ─► │  Articles│
+│  (BBC, NPR,  │    │  feedparser  │    │  + dedup (sha) │    │  JSON    │
+│   TC, ...)   │    └──────────────┘    └────────────────┘    └────┬─────┘
+└──────────────┘                                                    │
+                                                                    │
+   ┌────────────────────────────────────────────────────────────────┘
+   ▼
+┌──────────────┐    ┌─────────────────────┐    ┌──────────┐
+│  Chunking    │ ─► │  Sentence-BERT      │ ─► │  FAISS   │
+│  (overlap)   │    │  Embeddings (384d)  │    │  Index   │
+└──────────────┘    └─────────────────────┘    └────┬─────┘
                                                     │
-                          ┌─────────────────────────┘
-                          ▼
-              ┌───────────────────────┐    ┌────────────────────┐
-              │  Retriever            │ ─► │  LLM (GPT)         │ ─► Answer
-              │  (Top-K + Re-rank)    │    │  Context-aware QA  │
-              └───────────────────────┘    └────────────────────┘
+   User Query                                       │
+       │                                            │
+       ▼                                            │
+┌──────────────┐    ┌──────────────────┐    ┌──────────────┐
+│  Embed       │ ─► │  Top-K Search    │ ◄──┤  Retrieve    │ ◄──┘
+└──────────────┘    └────────┬─────────┘    └──────────────┘
+                             │
+        ┌────────────────────┼─────────────────────┐
+        ▼                    ▼                     ▼
+┌───────────────┐  ┌──────────────────┐  ┌──────────────────┐
+│  /search      │  │  /ask (RAG)      │  │  /trends         │
+│  → top hits   │  │  → LLM answer    │  │  → entities +    │
+│               │  │  + citations     │  │    sentiment     │
+└───────────────┘  └──────────────────┘  └──────────────────┘
+```
 
-              ┌──────────────────────────┐
-              │  Insight Layer           │
-              │  • Entity Recognition    │
-              │  • Sentiment Analysis    │
-              │  • Topic Modeling        │
-              └──────────────────────────┘
+## 📂 Project Structure
 
-              Orchestrated by Apache Airflow (scheduled incremental ingestion)
+```
+news-intelligence-rag/
+├── app/
+│   ├── config.py         # Paths, model names, RSS sources, hyperparameters
+│   ├── ingest.py         # httpx + feedparser RSS ingestion + dedup
+│   ├── chunking.py       # Sentence-aware chunking with overlap
+│   ├── embeddings.py     # Sentence-BERT encoder (cached)
+│   ├── vectorstore.py    # FAISS wrapper (build/save/load/search)
+│   ├── enrich.py         # Entity extraction + sentiment scoring
+│   ├── llm.py            # Groq client with grounded prompt + citation
+│   ├── rag.py            # Orchestrator: embed → retrieve → generate
+│   └── main.py           # FastAPI: /ingest /reindex /ask /search /trends
+├── scripts/
+│   └── run_pipeline.py   # CLI: ingest + chunk + embed + index in one shot
+├── data/
+│   ├── articles/         # Persisted article corpus (JSON)
+│   └── index/            # FAISS index + chunks
+├── requirements.txt
+└── .env.example
 ```
 
 ## ⚙️ Tech Stack
 
-| Layer            | Technology                                    |
-|------------------|-----------------------------------------------|
-| Language         | Python 3.10+                                  |
-| LLM              | OpenAI GPT (configurable: GPT-4 / GPT-4o)     |
-| Embeddings       | Hugging Face Transformers · Sentence-BERT     |
-| Vector Store     | FAISS (Facebook AI Similarity Search)         |
-| NLP utilities    | spaCy · NLTK · Hugging Face pipelines         |
-| Storage          | AWS S3 (raw articles, embeddings, metadata)   |
-| Orchestration    | Apache Airflow                                |
+| Layer            | Choice                              | Why |
+|------------------|-------------------------------------|------|
+| Ingestion        | `httpx` + `feedparser` + `bs4`      | httpx uses certifi → bypasses macOS SSL issues |
+| Deduplication    | SHA-1 hash of canonical URL/title   | Cheap, deterministic |
+| Embeddings       | `all-MiniLM-L6-v2` (384-dim)        | Fast, small, strong baseline |
+| Vector Store     | FAISS `IndexFlatIP`                 | Cosine via inner product on normalized vectors |
+| Enrichment       | Regex + curated lexicons            | No heavy deps; easy to swap for spaCy/HF later |
+| LLM              | Groq (LLaMA 3.3 70B)                | Free tier, blazing fast inference |
+| API              | FastAPI + Uvicorn                   | Async, auto-docs, production-ready |
 
-## 🔁 Pipeline Stages
+## 🚀 Quick Start
 
-1. **Ingestion** — Fetch articles from multiple news sources (APIs, RSS, scraping).
-2. **Preprocessing** — Clean HTML, normalize text, deduplicate by hash + semantic similarity.
-3. **Storage** — Raw articles + cleaned text written to AWS S3 with metadata (source, timestamp, URL).
-4. **Embedding** — Generate dense vector embeddings using Sentence-BERT.
-5. **Indexing** — Store embeddings in a FAISS index for fast semantic retrieval.
-6. **RAG Query** — User question → embed → retrieve top-K articles → pass as context to GPT → generate grounded answer.
-7. **Insight extraction** — Run NER, sentiment, and topic modeling on incoming articles.
-8. **Automation** — Airflow DAG runs incremental ingestion + index refresh on schedule.
+### 1. Setup
+```bash
+git clone https://github.com/TJA23/news-intelligence-rag.git
+cd news-intelligence-rag
+python3.13 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
 
-## 🧠 Key Engineering Decisions
+### 2. (Optional) Add Groq API key for LLM-synthesized answers
+Get a free key at https://console.groq.com → copy `.env.example` to `.env`:
+```bash
+cp .env.example .env
+# edit .env: GROQ_API_KEY=gsk_...
+```
+Without a key, `/ask` still returns the top retrieved articles (graceful degradation).
 
-- **RAG over fine-tuning** — keeps the system fresh as news changes daily; no retraining needed.
-- **FAISS over hosted vector DB** — fast, free, runs locally; perfect for prototype-to-prod.
-- **Deduplication at ingestion** — avoids cluttering the index with near-duplicate articles from wire services.
-- **Airflow for incremental updates** — only embeds new articles, not the entire corpus, saving compute.
+### 3. One-shot pipeline (ingest → chunk → embed → index)
+```bash
+python -m scripts.run_pipeline
+```
+Sample output:
+```
+[1/4] Ingesting from RSS feeds...
+  → corpus size: 60 (new: 60)
+[2/4] Chunking articles... → 62 chunks
+[3/4] Generating embeddings... → vectors shape: (62, 384)
+[4/4] Building & saving FAISS index... done.
+```
 
-## 📊 Outcomes
+### 4. Run the API
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+Open http://localhost:8000/docs for the interactive Swagger UI.
 
-- Built an **intelligent news analysis platform** unifying ingestion, search, and QA.
-- Implemented **RAG with FAISS** for context-aware question answering grounded in real articles.
-- Performed **NER, sentiment analysis, and topic modeling** for deeper insights.
-- Automated the entire pipeline using **Airflow** for periodic, incremental updates.
+### 5. Try it out
+```bash
+# fetch fresh articles
+curl -X POST http://localhost:8000/ingest
 
-## 🔮 Future Work
+# rebuild index after ingestion
+curl -X POST http://localhost:8000/reindex
 
-- Multi-modal: ingest video transcripts (YouTube, podcasts).
-- Re-ranking with cross-encoders for better top-K precision.
-- Streamlit / Next.js frontend for interactive analyst use.
-- Hybrid search (BM25 + dense) for better keyword + semantic recall.
+# semantic search
+curl "http://localhost:8000/search?q=artificial+intelligence&top_k=3"
+
+# RAG QA
+curl -X POST http://localhost:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question":"What are the latest tech industry developments?","top_k":4}'
+
+# trends
+curl http://localhost:8000/trends
+```
+
+## 🧠 Key Design Decisions
+
+- **httpx for fetching, feedparser for parsing** — splits the network IO from the parsing layer; sidesteps macOS Python SSL cert issues by relying on certifi.
+- **SHA-1 dedup at the URL level** — repeated pulls don't bloat the corpus or the index.
+- **Normalized embeddings + Inner Product** — equivalent to cosine similarity, faster on FAISS.
+- **`/reindex` separate from `/ingest`** — lets you re-embed after model swaps without re-fetching.
+- **LLM-optional retrieval** — system works without an LLM key; useful for CI tests and offline demos.
+- **Heuristic enrichment by default** — keeps install fast; production version would swap to spaCy NER / Hugging Face sentiment.
+
+## 📊 Sample Retrieval Quality
+
+| Query                              | Top match (score) | Source |
+|------------------------------------|-------------------|--------|
+| "artificial intelligence"          | 0.39 ✅            | Ars Technica — AI models considering user feelings |
+| "iran"                             | 0.31 ✅            | BBC — Billions of meals at risk due to Iran war |
+| "AI in defense or government"      | 0.50 ✅            | TechCrunch — Pentagon AI deals with Nvidia/MSFT/AWS |
+
+## 🔮 Roadmap
+
+- [ ] Swap heuristic NER for **spaCy / HF transformer pipeline**
+- [ ] Cross-encoder **re-ranking** of top-K results
+- [ ] **Topic modeling** (BERTopic / LDA) for theme detection
+- [ ] **Multi-turn** conversational memory in `/ask`
+- [ ] **Streamlit UI** for interactive analyst use
+- [ ] **Airflow DAG** for scheduled incremental ingestion (matches resume bullet)
+- [ ] **AWS S3** sink for raw articles (matches resume bullet)
+- [ ] **Hybrid retrieval** (BM25 + dense)
+- [ ] **Dockerize** for deployment
 
 ## 👤 Author
 

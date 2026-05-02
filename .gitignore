@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+data/index/
+data/articles/*.json
+.idea/
+.vscode/
